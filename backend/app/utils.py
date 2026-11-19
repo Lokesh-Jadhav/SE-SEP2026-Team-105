@@ -3,7 +3,7 @@ import jwt
 from flask import request, jsonify, current_app
 from functools import wraps
 from app.models import User
-
+from app.extensions import db
 
 def create_token(user):
     payload = {
@@ -29,7 +29,7 @@ def get_current_user():
     except Exception:
         return None
 
-    return User.query.get(payload.get("user_id"))
+    return db.session.get(User, payload.get("user_id"))
 
 
 def login_required(roles=None):
