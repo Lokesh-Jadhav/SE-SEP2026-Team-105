@@ -31,7 +31,32 @@ def client(app):
     return app.test_client()
 
 
-#login test and student profile tests
+# Admin API test fixtures
+@pytest.fixture
+def admin_user(app):
+    with app.app_context():
+        user = User(
+            email="admin@test.com",
+            password_hash=generate_password_hash("password123"),
+            role="admin"
+        )
+        db.session.add(user)
+        db.session.commit()
+
+        yield user
+
+        db.session.delete(user)
+        db.session.commit()
+
+
+# Create a JWT for the admin
+@pytest.fixture
+def admin_auth_token(app, admin_user):
+    with app.app_context():
+        return create_token(admin_user)
+
+
+# Login and student/mentor profile test fixtures
 @pytest.fixture
 def test_user(app):
     with app.app_context():

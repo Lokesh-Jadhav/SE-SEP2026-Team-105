@@ -10,7 +10,7 @@ auth_bp = Blueprint("auth", __name__)
 @auth_bp.route("/register", methods=["POST"])
 def register():
     data = request.get_json() or {}
-    email = data.get("email", "").strip().lower()
+    email = data.get("email", "").strip()
     password = data.get("password", "")
     role = data.get("role")
 
@@ -38,7 +38,7 @@ def register():
 @auth_bp.route("/login", methods=["POST"])
 def login():
     data = request.get_json() or {}
-    email = data.get("email", "").strip().lower()
+    email = data.get("email", "").strip()
     password = data.get("password", "")
 
     user = User.query.filter_by(email=email).first()
@@ -52,7 +52,7 @@ def login():
 @auth_bp.route("/me", methods=["GET"])
 @login_required()
 def me(user):
-    return jsonify({"user": serialize_user(user)})
+    return jsonify({"user": serialize_user(user)}), 403
 
 
 def serialize_user(user):
