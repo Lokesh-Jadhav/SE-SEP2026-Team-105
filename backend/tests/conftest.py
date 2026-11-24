@@ -31,7 +31,7 @@ def client(app):
     return app.test_client()
 
 
-#login test
+#login test and student profile tests
 @pytest.fixture
 def test_user(app):
     with app.app_context():
@@ -49,7 +49,7 @@ def test_user(app):
         db.session.delete(user)
         db.session.commit()
 
-#create JWT
+#create JWT for student
 @pytest.fixture
 def auth_token(app, test_user):
     with app.app_context():
@@ -69,3 +69,27 @@ def expired_auth_token(app, test_user):
         app.config["SECRET_KEY"],
         algorithm="HS256"
     )
+
+# Create a mentor user for mentor profile tests
+@pytest.fixture
+def mentor_user(app):
+    with app.app_context():
+        user = User(
+            email="mentor@test.com",
+            password_hash=generate_password_hash("password123"),
+            role="mentor"
+        )
+        db.session.add(user)
+        db.session.commit()
+
+        yield user
+
+        db.session.delete(user)
+        db.session.commit()
+
+
+# Create a JWT for the mentor
+@pytest.fixture
+def mentor_auth_token(app, mentor_user):
+    with app.app_context():
+        return create_token(mentor_user)
