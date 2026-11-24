@@ -2,7 +2,7 @@
 
 # 1) Test /login Success
 def test_login_success(client, test_user):
-    response = client.post("api/auth/login", json={
+    response = client.post("/api/auth/login", json={
         "email": "student@test.com",
         "password": "password123"
     })
