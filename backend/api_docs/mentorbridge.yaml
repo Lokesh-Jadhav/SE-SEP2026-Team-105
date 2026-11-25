@@ -1,0 +1,1750 @@
+openapi: 3.0.3
+
+info:
+  title: MentorBridge API
+  version: 1.0.0
+  description: |
+    MentorBridge is a student mentoring platform built by
+    Team 105 for the Software Engineering group project.
+
+    ## Authentication
+
+    Protected operations require a bearer JWT in the `Authorization` header: `Authorization: Bearer <token>`
+
+    Tokens are issued by `POST /api/auth/register` and `POST /api/auth/login`
+    and expire after 24 hours. A missing, malformed, or expired token returns
+    `401`. 
+
+    A valid token for the wrong role returns `403`.
+
+    ## Roles
+
+    `student`: Manage a student profile, view the active match, chat, complete goals, request meetings, end a mentorship, and submit feedback
+
+    `mentor`: Manage a mentor profile, publish availability, create/delete goals, chat, decide meetings, toggle availability, end a mentorship, and submit feedback
+
+    `admin`: Review/approve profiles, view metrics and feedback, generate mentor recommendations, and assign mentors
+
+    ## Error format
+
+    API validation and authorization errors use a JSON envelope: `{"error": "Human-readable message"}`
+
+
+servers:
+  - url: http://127.0.0.1:5000
+    description: Local Flask development server
+
+tags:
+  - name: Authentication
+    description: Registration, login, and current-user information.
+  - name: Profiles
+    description: Student and mentor profile creation and retrieval.
+  - name: Administration
+    description: Admin review, platform metrics, and feedback oversight.
+  - name: Matching
+    description: Mentor recommendations, assignment, and the current match.
+  - name: Chat
+    description: Messaging between students and mentors.
+    x-user-story: US-02
+  - name: Scheduling
+    description: Mentor availability and meeting requests.
+    x-user-stories:
+      - US-02
+      - US-05
+
+paths:
+  /api/auth/register:
+    post:
+      tags:
+        - Authentication
+      summary: Register a student or mentor account
+      description: |
+        Creates a new account. The email is trimmed, converted to lowercase,
+        and checked for duplicates. Passwords must contain at least eight
+        characters. Only the `student` and `mentor` roles can self-register;
+        admin accounts are provisioned separately.
+
+        On success the API returns a JWT and the new user. The account has
+        `profile_completed: false` until a profile is saved.
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            examples:
+              student:
+                summary: Student registration
+                value:
+                  email: student@example.com
+                  password: Password123
+                  role: student
+              mentor:
+                summary: Mentor registration
+                value:
+                  email: mentor@example.com
+                  password: Password123
+                  role: mentor
+      responses:
+        '201':
+          description: Account created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              examples:
+                created:
+                  summary: New student account
+                  value:
+                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example.signature
+                    user:
+                      id: 11
+                      email: student@example.com
+                      role: student
+                      profile_completed: false
+        '400':
+          description: A required field is missing, the role is invalid, or the password is shorter than 8 characters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingFieldsOrRole:
+                  summary: Missing email, password, or valid role
+                  value:
+                    error: Email, password, and valid role are required
+                shortPassword:
+                  summary: Password too short
+                  value:
+                    error: Password must be at least 8 characters
+        '409':
+          description: An account with the normalized email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: An account with this email already exists
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: Log in with email and password
+      description: |
+        Authenticates an existing account and returns a new JWT. The email is
+        trimmed and converted to lowercase before lookup.
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: ahmed@student.com
+              password: student123
+      responses:
+        '200':
+          description: Login successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              examples:
+                student:
+                  summary: Student login
+                  value:
+                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example.signature
+                    user:
+                      id: 2
+                      email: ahmed@student.com
+                      role: student
+                      profile_completed: true
+                admin:
+                  summary: Admin login
+                  value:
+                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example.signature
+                    user:
+                      id: 1
+                      email: admin@mentorbridge.com
+                      role: admin
+                      profile_completed: true
+        '401':
+          description: The email is not registered or the password is incorrect.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Invalid email or password
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/auth/me:
+    get:
+      tags:
+        - Authentication
+      summary: Get the authenticated user
+      description: |
+        Returns the user associated with the supplied bearer JWT. All
+        authenticated roles may call this operation. Requests
+        without a usable token are rejected by the login_required decorator.
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+              example:
+                user:
+                  id: 2
+                  email: ahmed@student.com
+                  role: student
+                  profile_completed: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/profiles/student:
+    post:
+      tags:
+        - Profiles
+      x-user-story: US-01
+      summary: Create or update the authenticated student's profile
+      description: |
+        Creates the student profile on the first call and updates it on later
+        calls. Every save resets the profile status to `pending`, requiring
+        admin approval again, and sets the user's `profile_completed` flag.
+
+        A successful save returns `200` for both creation and update.
+      operationId: saveStudentProfile
+      x-required-roles:
+        - student
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StudentProfileRequest'
+            example:
+              full_name: Ahmed Rahman
+              university: Dalhousie University
+              goal: masters
+              desired_job_title: Machine Learning Engineer
+              target_country: Canada
+              target_degree: MSc Computer Science
+              field_of_interest: Machine Learning
+              questions: How should I prepare applications for Canadian CS master's programs?
+      responses:
+        '200':
+          description: Student profile saved and submitted for review.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileSavedResponse'
+              example:
+                message: Student profile saved
+                status: pending
+        '400':
+          description: A required field is missing or the career goal is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingFields:
+                  summary: Missing full name or goal
+                  value:
+                    error: Full name and career goal are required
+                invalidGoal:
+                  summary: Goal outside the allowed enum
+                  value:
+                    error: Invalid career goal
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/profiles/mentor:
+    post:
+      tags:
+        - Profiles
+      x-user-story: US-03
+      summary: Create or update the authenticated mentor's profile
+      description: |
+        Creates the mentor profile on the first call and updates it on later
+        calls. Every save resets the profile status to `pending`, marks the
+        mentor as available, and sets the user's `profile_completed` flag.
+
+        A successful save currently returns `200` for both creation and update.
+      operationId: saveMentorProfile
+      x-required-roles:
+        - mentor
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MentorProfileRequest'
+            example:
+              full_name: Ali Khan
+              current_status: studying_abroad
+              university: University of Toronto
+              country: Canada
+              degree: MSc Applied Computing
+              job_title: ''
+              company: ''
+              expertise: Machine Learning, Masters in Canada, Graduate Applications
+              bio: Currently pursuing a master's degree in Canada and helping students with graduate applications.
+      responses:
+        '200':
+          description: Mentor profile saved and submitted for review.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileSavedResponse'
+              example:
+                message: Mentor profile submitted for review
+                status: pending
+        '400':
+          description: A required field is missing or the current status is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingFields:
+                  summary: Missing full name, current status, or expertise
+                  value:
+                    error: Full name, current status, and expertise are required
+                invalidStatus:
+                  summary: Current status outside the allowed enum
+                  value:
+                    error: Invalid current status
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/profiles/me:
+    get:
+      tags:
+        - Profiles
+      x-user-stories:
+        - US-01
+        - US-03
+      summary: Get the authenticated user's profile
+      description: |
+        Returns the student profile for a student token or the mentor profile
+        for a mentor token. When the profile has not been created yet, the
+        `profile` field is `null`.
+
+        Admin tokens are rejected because admins do not own a participant profile.
+      operationId: getMyProfile
+      x-required-roles:
+        - student
+        - mentor
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Profile lookup completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileResponse'
+              examples:
+                student:
+                  summary: Student profile
+                  value:
+                    profile:
+                      id: 1
+                      user_id: 2
+                      full_name: Ahmed Rahman
+                      university: Dalhousie University
+                      goal: masters
+                      desired_job_title: ''
+                      target_country: Canada
+                      target_degree: MSc Computer Science
+                      field_of_interest: Machine Learning
+                      questions: How should I prepare applications for Canadian CS master's programs?
+                      status: approved
+                mentor:
+                  summary: Mentor profile
+                  value:
+                    profile:
+                      id: 1
+                      user_id: 6
+                      full_name: Ali Khan
+                      current_status: studying_abroad
+                      university: University of Toronto
+                      country: Canada
+                      degree: MSc Applied Computing
+                      job_title: ''
+                      company: ''
+                      expertise: Machine Learning, Masters in Canada, Graduate Applications
+                      bio: Currently pursuing a master's degree in Canada and helping students with graduate applications.
+                      status: approved
+                      available: true
+                notCreated:
+                  summary: Profile not created yet
+                  value:
+                    profile: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/admin/metrics:
+    get:
+      tags:
+        - Administration
+      x-user-story: US-08
+      summary: Get platform metrics
+      description: |
+        Returns aggregate counts for the admin dashboard. Active matches
+        include matches in `active` and `pending_end` states.
+      operationId: getAdminMetrics
+      x-required-roles:
+        - admin
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Metrics calculated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminMetrics'
+              example:
+                total_students: 4
+                total_mentors: 5
+                pending_mentors: 1
+                pending_students: 1
+                active_matches: 1
+                ended_matches: 1
+                feedback_count: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/admin/students:
+    get:
+      tags:
+        - Administration
+      x-user-story: US-07
+      summary: List all student profiles
+      description: |
+        Returns every student profile with the linked account email and the
+        current review status.
+      operationId: listStudents
+      x-required-roles:
+        - admin
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Student profiles returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminStudentsResponse'
+              example:
+                students:
+                  - id: 4
+                    user_id: 5
+                    email: priya@student.com
+                    full_name: Priya Sharma
+                    university: University of Toronto
+                    goal: masters
+                    desired_job_title: ''
+                    target_country: Canada
+                    target_degree: MASc Electrical and Computer Engineering
+                    field_of_interest: Machine Learning
+                    questions: How important are research publications for master's admissions?
+                    status: pending
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/admin/mentors:
+    get:
+      tags:
+        - Administration
+      x-user-stories:
+        - US-06
+        - US-07
+      summary: List all mentor profiles
+      description: |
+        Returns every mentor profile with the linked account email, review
+        status, and availability flag.
+      operationId: listMentors
+      x-required-roles:
+        - admin
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Mentor profiles returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminMentorsResponse'
+              example:
+                mentors:
+                  - id: 1
+                    user_id: 6
+                    email: ali@mentor.com
+                    full_name: Ali Khan
+                    current_status: studying_abroad
+                    university: University of Toronto
+                    country: Canada
+                    degree: MSc Applied Computing
+                    job_title: ''
+                    company: ''
+                    expertise: Machine Learning, Masters in Canada, Graduate Applications
+                    bio: Currently pursuing a master's degree in Canada and helping students with graduate applications.
+                    status: approved
+                    available: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/admin/students/{profile_id}/decision:
+    post:
+      tags:
+        - Administration
+      x-user-story: US-07
+      summary: Approve or reject a student profile
+      description: |
+        Sets the review status of a student profile. Only `approved` and
+        `rejected` are accepted. The path identifier is the student profile
+        ID (`student_profiles.id`), not the user ID.
+
+      operationId: decideStudentProfile
+      x-required-roles:
+        - admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionRequest'
+            examples:
+              approve:
+                summary: Approve the profile
+                value:
+                  decision: approved
+              reject:
+                summary: Reject the profile
+                value:
+                  decision: rejected
+      responses:
+        '200':
+          description: Student profile status updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Student approved
+        '400':
+          description: The decision is missing or is not `approved` or `rejected`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                emptyBody:
+                  summary: Empty JSON body
+                  value:
+                    error: Decision must be approved or rejected
+                invalidDecision:
+                  summary: Unsupported decision value
+                  value:
+                    error: Decision must be approved or rejected
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No student profile exists with the supplied profile ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Student profile not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/admin/mentors/{profile_id}/decision:
+    post:
+      tags:
+        - Administration
+      x-user-stories:
+        - US-06
+        - US-07
+      summary: Approve or reject a mentor profile
+      description: |
+        Sets the review status of a mentor profile. Only `approved` and
+        `rejected` are accepted. The path identifier is the mentor profile
+        ID (`mentor_profiles.id`), not the user ID.
+
+        An empty JSON body or an unknown decision value returns `400`.
+      operationId: decideMentorProfile
+      x-required-roles:
+        - admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionRequest'
+            examples:
+              approve:
+                summary: Approve the profile
+                value:
+                  decision: approved
+              reject:
+                summary: Reject the profile
+                value:
+                  decision: rejected
+      responses:
+        '200':
+          description: Mentor profile status updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Mentor approved
+        '400':
+          description: The decision is missing or is not `approved` or `rejected`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                emptyBody:
+                  summary: Empty JSON body
+                  value:
+                    error: Decision must be approved or rejected
+                invalidDecision:
+                  summary: Unsupported decision value
+                  value:
+                    error: Decision must be approved or rejected
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No mentor profile exists with the supplied profile ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Mentor profile not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/admin/feedback:
+    get:
+      tags:
+        - Administration
+      x-user-story: US-08
+      summary: List all mentorship feedback
+      description: |
+        Returns all feedback submitted by students and mentors, newest first.
+      operationId: listAllFeedback
+      x-required-roles:
+        - admin
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Feedback returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminFeedbackResponse'
+              example:
+                feedback:
+                  - id: 2
+                    match_id: 2
+                    user_email: emma@mentor.com
+                    user_role: mentor
+                    rating: 4
+                    comments: Sara was engaged and asked thoughtful questions.
+                    created_at: '2026-11-16T14:20:00+00:00'
+                  - id: 1
+                    match_id: 2
+                    user_email: sara@student.com
+                    user_role: student
+                    rating: 5
+                    comments: Emma gave very practical advice about projects and interview preparation.
+                    created_at: '2026-11-16T14:15:00+00:00'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/matching/recommendations/{student_user_id}:
+    get:
+      tags:
+        - Matching
+      summary: Get ranked mentor recommendations for a student
+      description: |
+        Returns approved, available mentors ranked by fit for an approved
+        student. Mentors who already have an active or pending-end match are
+        excluded.
+
+        The score is the sum of:
+
+        - 35 points when the student's field of interest is contained in the
+          mentor's expertise
+        - 25 points when the student's desired job title is contained in the
+          mentor's job title
+        - 20 points when the student's target country equals the mentor's
+          country
+        - 15 points when the student's target degree is contained in the
+          mentor's degree
+        - 5 points when the mentor's status matches the student's goal
+          (`working` for job goals; `studying_abroad` for master's goals).
+
+        The three highest-scoring mentors are returned in
+        `top_recommendations`, the rest are returned in
+        `other_available_mentors`.
+      operationId: getMentorRecommendations
+      x-required-roles:
+        - admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/StudentUserId'
+      responses:
+        '200':
+          description: Recommendations calculated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationsResponse'
+        '400':
+          description: The student profile does not exist or has not been approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Student must be approved before matching
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: The student has already been matched at least once, including ended mentorships.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Student has already been matched previously
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/matching/assign:
+    post:
+      tags:
+        - Matching
+      summary: Assign a mentor to a student
+      description: |
+        Creates an active match between an approved student and an approved,
+        available mentor. The mentor must not already have an active or
+        pending end mentee, and the student must not already have an active or
+        pending end mentor.
+
+        The request uses user IDs (`users.id`) for both participants.
+      operationId: assignMentor
+      x-required-roles:
+        - admin
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignMentorRequest'
+      responses:
+        '201':
+          description: Mentor assigned and active match created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignMentorResponse'
+        '400':
+          description: A profile is not approved or the mentor is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                studentNotApproved:
+                  value:
+                    error: Student is not approved
+                mentorNotApproved:
+                  value:
+                    error: Mentor is not approved
+                mentorUnavailable:
+                  value:
+                    error: Mentor is currently unavailable
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The student or mentor user ID does not exist or has the wrong role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Invalid student or mentor
+        '409':
+          description: The student or mentor already has an active mentorship.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                mentorBusy:
+                  value:
+                    error: Mentor already has an active mentee
+                studentBusy:
+                  value:
+                    error: Student already has an active mentor
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/matching/my-match:
+    get:
+      tags:
+        - Matching
+      x-user-story: US-04
+      summary: Get the authenticated user's current or most recent match
+      description: |
+        Returns the most recently created match for the authenticated student
+        or mentor. The match may be `active`, `pending_end`, or `ended`.
+        When no match exists, the response is `{"match": null}`.
+
+        `feedback_submitted` indicates whether the current user has already
+        submitted feedback for the match.
+      operationId: getMyMatch
+      x-required-roles:
+        - student
+        - mentor
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Match lookup completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MyMatchResponse'
+              examples:
+                active:
+                  summary: Active match
+                  value:
+                    match:
+                      id: 1
+                      status: active
+                      student_end_requested: false
+                      mentor_end_requested: false
+                      feedback_submitted: false
+                      other_user:
+                        id: 6
+                        email: ali@mentor.com
+                        full_name: Ali Khan
+                ended:
+                  summary: Ended match with feedback already submitted
+                  value:
+                    match:
+                      id: 2
+                      status: ended
+                      student_end_requested: true
+                      mentor_end_requested: true
+                      feedback_submitted: true
+                      other_user:
+                        id: 7
+                        email: emma@mentor.com
+                        full_name: Emma Wilson
+                none:
+                  summary: No match yet
+                  value:
+                    match: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT returned by `POST /api/auth/register` or `POST /api/auth/login`.
+        Supply it as `Authorization: Bearer <token>`.
+
+  parameters:
+    ProfileId:
+      name: profile_id
+      in: path
+      required: true
+      description: |
+        Database ID of the student or mentor profile (`student_profiles.id`
+        or `mentor_profiles.id`), not the user ID.
+      schema:
+        type: integer
+        minimum: 1
+    
+    StudentUserId:
+      name: student_user_id
+      in: path
+      required: true
+      description: User ID of the student (`users.id`), not the student profile ID.
+      schema:
+        type: integer
+        minimum: 1
+    
+
+  responses:
+    Unauthorized:
+      description: Authentication is missing, malformed, expired, or invalid.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missingOrInvalidToken:
+              summary: No usable bearer token
+              value:
+                error: Authentication required
+    Forbidden:
+      description: The authenticated user does not have the required role for this operation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            wrongRole:
+              summary: Role check failed
+              value:
+                error: Unauthorized
+    InternalServerError:
+      description: An unexpected server-side error occurred.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Internal server error
+  
+  schemas:
+    ErrorResponse:
+      type: object
+      description: Standard error returned by API validation and authorization failures.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Human readable explanation of the failure.
+          example: Authentication required
+      
+    MessageResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          example: Operation completed
+    
+    RegisterRequest:
+      type: object
+      required:
+        - email
+        - password
+        - role
+      properties:
+        email:
+          type: string
+          format: email
+          description: Trimmed and converted to lowercase before duplicate detection.
+          example: student@example.com
+        password:
+          type: string
+          format: password
+          minLength: 8
+          description: Plain-text password; hashed before storage.
+          example: Password123
+        role:
+          type: string
+          enum:
+            - student
+            - mentor
+          description: Self-registration is limited to student and mentor accounts.
+          example: student
+    
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          description: Trimmed and converted to lowercase before lookup.
+          example: ahmed@student.com
+        password:
+          type: string
+          format: password
+          example: student123
+
+    AuthResponse:
+      type: object
+      required:
+        - token
+        - user
+      properties:
+        token:
+          type: string
+          description: JWT used to authenticate subsequent requests.
+        user:
+          $ref: '#/components/schemas/User'
+    
+    UserResponse:
+      type: object
+      required:
+        - user
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+
+    User:
+      type: object
+      required:
+        - id
+        - email
+        - role
+        - profile_completed
+      properties:
+        id:
+          type: integer
+          description: Database identifier of the user.
+          example: 2
+        email:
+          type: string
+          format: email
+          example: ahmed@student.com
+        role:
+          type: string
+          enum:
+            - student
+            - mentor
+            - admin
+          example: student
+        profile_completed:
+          type: boolean
+          description: True after a student or mentor profile has been saved.
+          example: true
+          
+    StudentProfileRequest:
+      type: object
+      required:
+        - full_name
+        - goal
+      properties:
+        full_name:
+          type: string
+          maxLength: 150
+          example: Ahmed Rahman
+        university:
+          type: string
+          maxLength: 200
+          nullable: true
+          example: Dalhousie University
+        goal:
+          type: string
+          enum:
+            - job
+            - masters
+            - both
+          example: masters
+        desired_job_title:
+          type: string
+          maxLength: 200
+          nullable: true
+          example: Machine Learning Engineer
+        target_country:
+          type: string
+          maxLength: 100
+          nullable: true
+          example: Canada
+        target_degree:
+          type: string
+          maxLength: 200
+          nullable: true
+          example: MSc Computer Science
+        field_of_interest:
+          type: string
+          maxLength: 200
+          nullable: true
+          example: Machine Learning
+        questions:
+          type: string
+          nullable: true
+          example: How should I prepare applications for Canadian CS master's programs?
+
+    MentorProfileRequest:
+      type: object
+      required:
+        - full_name
+        - current_status
+        - expertise
+      properties:
+        full_name:
+          type: string
+          maxLength: 150
+          example: Ali Khan
+        current_status:
+          type: string
+          enum:
+            - studying_abroad
+            - working
+          example: studying_abroad
+        university:
+          type: string
+          maxLength: 200
+          nullable: true
+          example: University of Toronto
+        country:
+          type: string
+          maxLength: 100
+          nullable: true
+          example: Canada
+        degree:
+          type: string
+          maxLength: 200
+          nullable: true
+          example: MSc Applied Computing
+        job_title:
+          type: string
+          maxLength: 200
+          nullable: true
+          example: ''
+        company:
+          type: string
+          maxLength: 200
+          nullable: true
+          example: ''
+        expertise:
+          type: string
+          maxLength: 500
+          example: Machine Learning, Masters in Canada, Graduate Applications
+        bio:
+          type: string
+          nullable: true
+          example: Currently pursuing a master's degree in Canada and helping students with graduate applications.
+
+    ProfileSavedResponse:
+      type: object
+      required:
+        - message
+        - status
+      properties:
+        message:
+          type: string
+          example: Student profile saved
+        status:
+          type: string
+          enum:
+            - pending
+            - approved
+            - rejected
+          example: pending
+
+    ProfileResponse:
+      type: object
+      required:
+        - profile
+      properties:
+        profile:
+          description: Student profile, mentor profile, or null when the profile has not been created.
+          nullable: true
+          oneOf:
+            - $ref: '#/components/schemas/StudentProfile'
+            - $ref: '#/components/schemas/MentorProfile'
+    
+    StudentProfile:
+      type: object
+      required:
+        - id
+        - user_id
+        - full_name
+        - goal
+        - status
+      properties:
+        id:
+          type: integer
+          example: 1
+        user_id:
+          type: integer
+          example: 2
+        full_name:
+          type: string
+          example: Ahmed Rahman
+        university:
+          type: string
+          nullable: true
+          example: Dalhousie University
+        goal:
+          type: string
+          enum:
+            - job
+            - masters
+            - both
+          example: masters
+        desired_job_title:
+          type: string
+          nullable: true
+          example: Machine Learning Engineer
+        target_country:
+          type: string
+          nullable: true
+          example: Canada
+        target_degree:
+          type: string
+          nullable: true
+          example: MSc Computer Science
+        field_of_interest:
+          type: string
+          nullable: true
+          example: Machine Learning
+        questions:
+          type: string
+          nullable: true
+          example: How should I prepare applications for Canadian CS master's programs?
+        status:
+          type: string
+          enum:
+            - pending
+            - approved
+            - rejected
+          example: approved
+
+    MentorProfile:
+      type: object
+      required:
+        - id
+        - user_id
+        - full_name
+        - current_status
+        - expertise
+        - status
+        - available
+      properties:
+        id:
+          type: integer
+          example: 1
+        user_id:
+          type: integer
+          example: 6
+        full_name:
+          type: string
+          example: Ali Khan
+        current_status:
+          type: string
+          enum:
+            - studying_abroad
+            - working
+          example: studying_abroad
+        university:
+          type: string
+          nullable: true
+          example: University of Toronto
+        country:
+          type: string
+          nullable: true
+          example: Canada
+        degree:
+          type: string
+          nullable: true
+          example: MSc Applied Computing
+        job_title:
+          type: string
+          nullable: true
+          example: ''
+        company:
+          type: string
+          nullable: true
+          example: ''
+        expertise:
+          type: string
+          example: Machine Learning, Masters in Canada, Graduate Applications
+        bio:
+          type: string
+          nullable: true
+          example: Currently pursuing a master's degree in Canada and helping students with graduate applications.
+        status:
+          type: string
+          enum:
+            - pending
+            - approved
+            - rejected
+          example: approved
+        available:
+          type: boolean
+          example: true
+
+    AdminMetrics:
+      type: object
+      required:
+        - total_students
+        - total_mentors
+        - pending_mentors
+        - pending_students
+        - active_matches
+        - ended_matches
+        - feedback_count
+      properties:
+        total_students:
+          type: integer
+          example: 4
+        total_mentors:
+          type: integer
+          example: 5
+        pending_mentors:
+          type: integer
+          example: 1
+        pending_students:
+          type: integer
+          example: 1
+        active_matches:
+          type: integer
+          description: Matches with status `active` or `pending_end`.
+          example: 1
+        ended_matches:
+          type: integer
+          example: 1
+        feedback_count:
+          type: integer
+          example: 2
+
+    AdminStudentsResponse:
+      type: object
+      required:
+        - students
+      properties:
+        students:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminStudentProfile'
+
+    AdminMentorsResponse:
+      type: object
+      required:
+        - mentors
+      properties:
+        mentors:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminMentorProfile'
+
+    AdminFeedbackResponse:
+      type: object
+      required:
+        - feedback
+      properties:
+        feedback:
+          type: array
+          description: Feedback entries ordered newest first.
+          items:
+            $ref: '#/components/schemas/AdminFeedbackItem'
+      
+    AdminFeedbackItem:
+      type: object
+      required:
+        - id
+        - match_id
+        - user_email
+        - user_role
+        - rating
+        - created_at
+      properties:
+        id:
+          type: integer
+        match_id:
+          type: integer
+        user_email:
+          type: string
+          format: email
+          example: sara@student.com
+        user_role:
+          type: string
+          enum:
+            - student
+            - mentor
+            - admin
+          example: student
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comments:
+          type: string
+          nullable: true
+          example: Emma gave very practical advice about projects and interview preparation.
+        created_at:
+          type: string
+          format: date-time
+
+    AdminStudentProfile:
+      type: object
+      required:
+        - id
+        - user_id
+        - email
+        - full_name
+        - goal
+        - status
+      properties:
+        id:
+          type: integer
+        user_id:
+          type: integer
+        email:
+          type: string
+          format: email
+          example: ahmed@student.com
+        full_name:
+          type: string
+          example: Ahmed Rahman
+        university:
+          type: string
+          nullable: true
+          example: Dalhousie University
+        goal:
+          type: string
+          enum:
+            - job
+            - masters
+            - both
+        desired_job_title:
+          type: string
+          nullable: true
+        target_country:
+          type: string
+          nullable: true
+          example: Canada
+        target_degree:
+          type: string
+          nullable: true
+          example: MSc Computer Science
+        field_of_interest:
+          type: string
+          nullable: true
+          example: Machine Learning
+        questions:
+          type: string
+          nullable: true
+          example: How should I prepare applications for Canadian CS master's programs?
+        status:
+          type: string
+          enum:
+            - pending
+            - approved
+            - rejected
+
+    AdminMentorProfile:
+      type: object
+      required:
+        - id
+        - user_id
+        - email
+        - full_name
+        - current_status
+        - expertise
+        - status
+        - available
+      properties:
+        id:
+          type: integer
+        user_id:
+          type: integer
+        email:
+          type: string
+          format: email
+          example: ali@mentor.com
+        full_name:
+          type: string
+          example: Ali Khan
+        current_status:
+          type: string
+          enum:
+            - studying_abroad
+            - working
+        university:
+          type: string
+          nullable: true
+          example: University of Toronto
+        country:
+          type: string
+          nullable: true
+          example: Canada
+        degree:
+          type: string
+          nullable: true
+          example: MSc Applied Computing
+        job_title:
+          type: string
+          nullable: true
+        company:
+          type: string
+          nullable: true
+        expertise:
+          type: string
+        bio:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum:
+            - pending
+            - approved
+            - rejected
+        available:
+          type: boolean
+
+    DecisionRequest:
+        type: object
+        required:
+          - decision
+        properties:
+          decision:
+            type: string
+            enum:
+              - approved
+              - rejected
+
+    RecommendationsResponse:
+      type: object
+      required:
+        - top_recommendations
+        - other_available_mentors
+      properties:
+        top_recommendations:
+          type: array
+          description: Up to three highest scoring approved, available mentors.
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/Recommendation'
+        other_available_mentors:
+          type: array
+          description: Remaining approved, available mentors ranked by score.
+          items:
+            $ref: '#/components/schemas/Recommendation'
+    
+    Recommendation:
+      type: object
+      required:
+        - mentor_user_id
+        - mentor
+        - score
+        - reasons
+      properties:
+        mentor_user_id:
+          type: integer
+        mentor:
+          $ref: '#/components/schemas/MentorSummary'
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Sum of the matching rule points
+
+    MentorSummary:
+      type: object
+      required:
+        - user_id
+        - full_name
+        - current_status
+        - expertise
+      properties:
+        user_id:
+          type: integer
+        full_name:
+          type: string
+          example: David Chen
+        current_status:
+          type: string
+          enum:
+            - studying_abroad
+            - working
+          example: working
+        university:
+          type: string
+          nullable: true
+          example: University of Waterloo
+        country:
+          type: string
+          nullable: true
+          example: Canada
+        degree:
+          type: string
+          nullable: true
+          example: MSc Data Science
+        job_title:
+          type: string
+          nullable: true
+          example: Data Scientist
+        company:
+          type: string
+          nullable: true
+          example: RBC
+        expertise:
+          type: string
+          example: Data Science, Machine Learning, Data Scientist, Career Transition
+        bio:
+          type: string
+          nullable: true
+
+    AssignMentorRequest:
+      type: object
+      required:
+        - student_id
+        - mentor_id
+      properties:
+        student_id:
+          type: integer
+          description: User ID of the student.
+        mentor_id:
+          type: integer
+          description: User ID of the mentor.
+
+    AssignMentorResponse:
+      type: object
+      required:
+        - message
+        - match_id
+      properties:
+        message:
+          type: string
+        match_id:
+          type: integer
+
+    MatchSummary:
+      type: object
+      required:
+        - id
+        - status
+        - student_end_requested
+        - mentor_end_requested
+        - feedback_submitted
+        - other_user
+      properties:
+        id:
+          type: integer
+          example: 1
+        status:
+          type: string
+          enum:
+            - active
+            - pending_end
+            - ended
+          example: active
+        student_end_requested:
+          type: boolean
+          example: false
+        mentor_end_requested:
+          type: boolean
+          example: false
+        feedback_submitted:
+          type: boolean
+          description: Whether the current user has submitted feedback for this match.
+          example: false
+        other_user:
+          $ref: '#/components/schemas/OtherUser'
+
+    MyMatchResponse:
+      type: object
+      required:
+        - match
+      properties:
+        match:
+          description: Latest match for the user, or null when no match exists.
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/MatchSummary'
+
+    OtherUser:
+      type: object
+      required:
+        - id
+        - email
+        - full_name
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+          description: Uses the profile name when available; otherwise the email.
